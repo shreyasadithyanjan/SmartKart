@@ -125,7 +125,7 @@ These will instantly return preloaded results:
 ## Roadmap
 
 - [x] Phase 1: Preloaded datasets with full UI
-- [ ] Phase 2: Live search via SerpAPI / Google Shopping API
-- [ ] Phase 3: LLM-powered review summarization (Gemini)
+- [x] Phase 2: Live search via SerpAPI / Google Shopping API
+- [x] Phase 3: LLM-powered review summarization (Gemini)
 - [ ] Phase 4: Conversational AI with memory
 - [ ] Phase 5: Price drop alerts (email/push)
