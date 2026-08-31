@@ -126,8 +126,9 @@ def search_live(query: str) -> list[dict]:
             logger.info(f"SerpApi returned no shopping results for '{query}'")
             return []
 
-        # Group results by (title, source) → take cheapest per source
-        grouped: dict[str, dict] = {}   # key = normalised title
+        # Group results by similar titles so we get multiple platforms per product card
+        # We'll use the first 3 words of the title as a grouping key to merge similar variants
+        grouped_products = {}
         for item in shopping_results:
             title = item.get("title", "").strip()
             if not title:
@@ -137,15 +138,22 @@ def search_live(query: str) -> list[dict]:
             if price == 0:
                 continue
 
-            norm_title = re.sub(r"\s+", " ", title.lower())[:80]
-            if norm_title not in grouped or price < grouped[norm_title]["_price"]:
-                grouped[norm_title] = {**item, "_price": price}
+            # Group results by similar titles so we get multiple platforms per product card
+            words = re.sub(r"[^a-z0-9\s]", "", title.lower()).split()
+            base_key = " ".join(words[:4]) if len(words) >= 4 else " ".join(words)
 
-        # Build Product-shaped dicts
-        products: list[dict] = []
-        for norm_title, item in list(grouped.items())[:10]:
-            title = item.get("title", "").strip()
-            price = item["_price"]
+            # Use fuzzy matching to see if it matches an existing group
+            group_key = None
+            if grouped_products:
+                from thefuzz import fuzz
+                for existing_key in grouped_products.keys():
+                    if fuzz.token_set_ratio(base_key, existing_key) >= 75:
+                        group_key = existing_key
+                        break
+            
+            if not group_key:
+                group_key = base_key
+
             source = item.get("source", "Unknown")
             link = item.get("link", "") or item.get("product_link", "")
             thumbnail = item.get("thumbnail", "")
@@ -154,12 +162,51 @@ def search_live(query: str) -> list[dict]:
             delivery_raw = item.get("delivery", "Check site for delivery")
 
             platform_key, platform_display = _map_platform(source)
+
+            # Check if we already have this platform for this group (keep cheapest)
+            if group_key not in grouped_products:
+                grouped_products[group_key] = {
+                    "title": title,
+                    "thumbnail": thumbnail,
+                    "platforms": {}
+                }
+            
+            existing_platforms = grouped_products[group_key]["platforms"]
+            if platform_key not in existing_platforms or price < existing_platforms[platform_key]["price"]:
+                existing_platforms[platform_key] = {
+                    "platform": platform_key,
+                    "platform_display": platform_display,
+                    "price": price,
+                    "original_price": price,
+                    "discount_percent": 0,
+                    "url": link or _build_search_url(platform_key, query),
+                    "in_stock": True,
+                    "delivery": str(delivery_raw) if delivery_raw else "Check site for delivery",
+                    "rating": float(rating_raw) if rating_raw else 0.0,
+                    "total_reviews": int(reviews_raw) if reviews_raw else 0,
+                    "offers": [],
+                    "reviews": [],
+                    "seller": source,
+                    "warranty": None,
+                }
+
+        # Build Product-shaped dicts
+        products: list[dict] = []
+        for group_key, data in list(grouped_products.items())[:6]: # Return top 6 distinct products
+            title = data["title"]
+            platform_list = list(data["platforms"].values())
+            
+            # Skip products that only have 1 platform if we have others, to prefer multi-platform
+            if len(platform_list) == 0:
+                continue
+                
+            cheapest = min(platform_list, key=lambda p: p["price"])
+            price = cheapest["price"]
             product_id = _make_product_id(query, title)
 
-            # Extract a rough brand guess from the title (first word often is brand)
             brand = title.split()[0] if title else "Unknown"
 
-            # Detect a rough category from query keywords
+            # Detect a rough category
             q_lower = query.lower()
             if any(k in q_lower for k in ["phone", "mobile", "smartphone", "poco", "redmi", "oneplus", "pixel", "galaxy"]):
                 category = "electronics"
@@ -174,37 +221,20 @@ def search_live(query: str) -> list[dict]:
             else:
                 category = "electronics"
 
-            platform_listing = {
-                "platform": platform_key,
-                "platform_display": platform_display,
-                "price": price,
-                "original_price": price,          # SerpApi doesn't give MRP; use same
-                "discount_percent": 0,
-                "url": link or _build_search_url(platform_key, query),
-                "in_stock": True,
-                "delivery": str(delivery_raw) if delivery_raw else "Check site for delivery",
-                "rating": float(rating_raw) if rating_raw else 0.0,
-                "total_reviews": int(reviews_raw) if reviews_raw else 0,
-                "offers": [],
-                "reviews": [],
-                "seller": source,
-                "warranty": None,
-            }
-
             product = {
                 "id": product_id,
                 "name": title,
                 "brand": brand,
                 "category": category,
                 "subcategory": None,
-                "image_url": thumbnail,
-                "description": f"{title} — live result from {platform_display}",
+                "image_url": data["thumbnail"],
+                "description": f"{title} — live search result across {len(platform_list)} platforms",
                 "search_keywords": query.lower().split(),
                 "specs": [],
-                "platforms": [platform_listing],
-                "price_history": [{"date": "2026-08-01", "platform": platform_key, "price": price}],
+                "platforms": platform_list,
+                "price_history": [{"date": "2026-08-01", "platform": cheapest["platform"], "price": price}],
                 "best_price": price,
-                "best_platform": platform_key,
+                "best_platform": cheapest["platform"],
                 "lowest_ever_price": price,
                 "lowest_ever_date": "2026-08-01",
                 "ai_verdict": None,
@@ -213,7 +243,7 @@ def search_live(query: str) -> list[dict]:
             }
             products.append(product)
 
-        logger.info(f"SerpApi returned {len(products)} live products for '{query}'")
+        logger.info(f"SerpApi returned {len(products)} grouped products for '{query}'")
         return products
 
     except Exception as e:
